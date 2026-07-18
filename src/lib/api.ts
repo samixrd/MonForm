@@ -13,7 +13,7 @@ const RPC_URL = "https://testnet-rpc.monad.xyz";
  * Verified via binary-search of eth_getCode on 2026-07-18.
  */
 const CONTRACT_DEPLOY_BLOCK =
-  BigInt(process.env.NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK ?? "45989334");
+  BigInt(process.env.NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK ?? "46037892");
 
 /** Maximum blocks per eth_getLogs call (Monad cap is 100; use 90 for safety). */
 const LOG_CHUNK_SIZE = 90n;
@@ -85,33 +85,32 @@ export async function getForms(
   }
 
   const totalChunks = ranges.length;
+  const showProgress = totalChunks > 10;
+  let chunksScanned = 0;
 
   // Type the log accumulator from a concrete typed getLogs signature.
   type FormCreatedLog = Awaited<ReturnType<typeof publicClient.getLogs<typeof FORM_CREATED_EVENT>>>;
-  const allLogs: FormCreatedLog = [];
 
-  // Sequential scan with a short inter-chunk delay to avoid 429s.
-  let chunkIndex = 0;
-  for (const { from, to } of ranges) {
+  // Fire all chunk requests in parallel — independent read-only queries.
+  const chunkResults = await Promise.all(
+    ranges.map(async ({ from, to }) => {
+      const result = await publicClient.getLogs({
+        address: MONFORM_CONTRACT_ADDRESS,
+        event: FORM_CREATED_EVENT,
+        // Filter by owner directly so the RPC skips other owners' events.
+        args: { owner: ownerAddress as `0x${string}` },
+        fromBlock: from,
+        toBlock: to,
+      });
+      if (showProgress) {
+        chunksScanned++;
+        onProgress?.(chunksScanned, totalChunks);
+      }
+      return result;
+    }),
+  );
 
-    const chunk = await publicClient.getLogs({
-      address: MONFORM_CONTRACT_ADDRESS,
-      event: FORM_CREATED_EVENT,
-      // Filter by owner (topic[1]) directly so the RPC skips other owners' events.
-      args: { owner: ownerAddress as `0x${string}` },
-      fromBlock: from,
-      toBlock: to,
-    });
-
-    allLogs.push(...chunk);
-    chunkIndex++;
-    onProgress?.(chunkIndex, totalChunks);
-
-    // Brief pause between chunks — keeps us well under Monad's rate limit.
-    if (chunkIndex < totalChunks) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-  }
+  const allLogs: FormCreatedLog = chunkResults.flat();
 
   // Fetch each matched form's schema in parallel.
   const forms = await Promise.all(
