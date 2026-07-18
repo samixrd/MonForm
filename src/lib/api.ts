@@ -54,13 +54,15 @@ const FORM_CREATED_EVENT = {
  * Fetch all forms owned by the given address by scanning FormCreated events.
  *
  * Monad's public testnet RPC caps eth_getLogs to a 100-block range per call,
- * so we walk the chain in LOG_CHUNK_SIZE-block windows from the contract's
- * deploy block to the current head and merge the results.
+ * so we build all chunk ranges up front and fire them all in parallel with
+ * Promise.all — each chunk is an independent read-only query so this is safe,
+ * and it cuts the total wall-clock time to a single round-trip batch regardless
+ * of how many chunks there are.
  *
  * @param ownerAddress  Wallet address whose forms to fetch.
- * @param onProgress    Optional callback invoked after each chunk with
- *                      (chunksScanned, totalChunks) so the UI can show
- *                      real progress instead of a frozen spinner.
+ * @param onProgress    Optional callback invoked with (chunksScanned, totalChunks).
+ *                      Only fires if totalChunks > 5; for small ranges the load
+ *                      completes fast enough that a progress bar would just flash.
  */
 export async function getForms(
   ownerAddress: string,
@@ -71,42 +73,47 @@ export async function getForms(
   const latestBlock = await publicClient.getBlockNumber();
   const fromBlock = CONTRACT_DEPLOY_BLOCK;
 
-  // Total number of chunks we'll need to scan.
-  const totalChunks = Math.ceil(
-    Number(latestBlock - fromBlock + 1n) / Number(LOG_CHUNK_SIZE),
-  );
+  // Build all [from, to] chunk ranges up front.
+  const ranges: Array<{ from: bigint; to: bigint }> = [];
+  let cursor = fromBlock;
+  while (cursor <= latestBlock) {
+    const end =
+      cursor + LOG_CHUNK_SIZE - 1n < latestBlock
+        ? cursor + LOG_CHUNK_SIZE - 1n
+        : latestBlock;
+    ranges.push({ from: cursor, to: end });
+    cursor = end + 1n;
+  }
+
+  const totalChunks = ranges.length;
+  const showProgress = totalChunks > 5;
+  let chunksScanned = 0;
 
   // Type the accumulator from a real typed getLogs call so .args is resolved.
   type FormCreatedLog = Awaited<ReturnType<typeof publicClient.getLogs<typeof FORM_CREATED_EVENT>>>;
-  const allLogs: FormCreatedLog = [];
 
-  let chunkStart = fromBlock;
-  let chunksScanned = 0;
+  // Fire all chunk requests in parallel — independent read-only queries.
+  const chunkResults = await Promise.all(
+    ranges.map(async ({ from, to }) => {
+      const result = await publicClient.getLogs({
+        address: MONFORM_CONTRACT_ADDRESS,
+        event: FORM_CREATED_EVENT,
+        fromBlock: from,
+        toBlock: to,
+      });
+      if (showProgress) {
+        chunksScanned++;
+        onProgress?.(chunksScanned, totalChunks);
+      }
+      return result;
+    }),
+  );
 
-  while (chunkStart <= latestBlock) {
-    const chunkEnd =
-      chunkStart + LOG_CHUNK_SIZE - 1n < latestBlock
-        ? chunkStart + LOG_CHUNK_SIZE - 1n
-        : latestBlock;
-
-    const chunk = await publicClient.getLogs({
-      address: MONFORM_CONTRACT_ADDRESS,
-      event: FORM_CREATED_EVENT,
-      fromBlock: chunkStart,
-      toBlock: chunkEnd,
-    });
-
-    allLogs.push(...chunk);
-    chunksScanned++;
-    onProgress?.(chunksScanned, totalChunks);
-
-    chunkStart = chunkEnd + 1n;
-  }
+  const allLogs: FormCreatedLog = chunkResults.flat();
 
   // Filter to this owner's logs only.
   const ownerLogs = allLogs.filter(
-    (log) =>
-      log.args.owner?.toLowerCase() === ownerAddress.toLowerCase(),
+    (log) => log.args.owner?.toLowerCase() === ownerAddress.toLowerCase(),
   );
 
   // Fetch each form's schema in parallel.
