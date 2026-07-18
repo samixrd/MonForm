@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
+import Link from "next/link";
 import { Wallet, Copy, ExternalLink, LogOut, Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { monadTestnet } from "@/lib/wagmi";
@@ -40,7 +41,14 @@ export function WalletConnectButton({ className }: { className?: string }) {
 
   if (isConnected && address) {
     return (
-      <div className={cn("relative", className)} ref={menuRef}>
+      <div className="flex items-center gap-5">
+        <Link
+          href="/dashboard"
+          className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+        >
+          Dashboard
+        </Link>
+        <div className={cn("relative", className)} ref={menuRef}>
         <Button
           variant="outline"
           onClick={() => setMenuOpen((v) => !v)}
@@ -93,8 +101,9 @@ export function WalletConnectButton({ className }: { className?: string }) {
           </button>
         </div>
       </div>
-    );
-  }
+    </div>
+  );
+}
 
   return (
     <div className={cn("flex flex-col items-end gap-1.5", className)}>
