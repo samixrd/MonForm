@@ -36,6 +36,55 @@ export function getWalletClient() {
 }
 
 // ---------------------------------------------------------------------------
+// Rate Limiting Helper
+// ---------------------------------------------------------------------------
+
+const MAX_REQUESTS_PER_SECOND = 15;
+const DELAY_BETWEEN_REQUESTS = 1000 / MAX_REQUESTS_PER_SECOND;
+
+/**
+ * Runs a list of async tasks sequentially with a minimum delay between each,
+ * ensuring we stay under the RPC rate limit (e.g. 25/sec).
+ * Automatically retries with exponential backoff on 429 Too Many Requests.
+ */
+async function runWithRateLimit<T>(
+  tasks: (() => Promise<T>)[],
+  onProgress?: (done: number, total: number) => void
+): Promise<T[]> {
+  const results: T[] = [];
+  const total = tasks.length;
+  if (total === 0) return results;
+
+  let index = 0;
+  for (const task of tasks) {
+    let retries = 0;
+    while (true) {
+      try {
+        if (index > 0 || retries > 0) {
+          await new Promise((r) => setTimeout(r, DELAY_BETWEEN_REQUESTS));
+        }
+        const result = await task();
+        results.push(result);
+        index++;
+        onProgress?.(index, total);
+        break;
+      } catch (err: any) {
+        const msg = err?.message?.toLowerCase() || "";
+        if (msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests") || msg.includes("requests limited")) {
+          retries++;
+          if (retries > 3) throw err;
+          // Backoff: 500ms, 1s, 2s
+          await new Promise((r) => setTimeout(r, 500 * Math.pow(2, retries - 1)));
+        } else {
+          throw err;
+        }
+      }
+    }
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // Forms
 // ---------------------------------------------------------------------------
 
@@ -53,12 +102,10 @@ const FORM_CREATED_EVENT = {
 /**
  * Fetch all forms owned by the given address by scanning FormCreated events.
  *
- * Monad's public testnet RPC caps eth_getLogs to a 100-block range per call AND
- * rate-limits heavy parallel traffic with 429s.  We therefore:
- *   1. Filter by owner address as an indexed topic so each call only returns
- *      this owner's events (avoids large payloads and wasted filtering).
- *   2. Walk chunks sequentially with a short delay between calls to stay
- *      comfortably inside the rate limit.
+ * This uses a local cache (localStorage) to avoid re-scanning the entire chain
+ * history on every load. It only scans from (lastScannedBlock + 1) to the
+ * latest block. It processes chunk requests through a rate-limited queue
+ * to avoid 429 errors from the RPC.
  *
  * @param ownerAddress  Wallet address whose forms to fetch.
  * @param onProgress    Callback fired after each chunk: (chunksScanned, totalChunks).
@@ -70,9 +117,32 @@ export async function getForms(
   const publicClient = getPublicClient();
 
   const latestBlock = await publicClient.getBlockNumber();
-  const fromBlock = CONTRACT_DEPLOY_BLOCK;
+  let fromBlock = CONTRACT_DEPLOY_BLOCK;
+  let cachedForms: Form[] = [];
+  
+  const cacheKey = `monform_cache_${ownerAddress.toLowerCase()}`;
 
-  // Build all chunk ranges up front so we know totalChunks before starting.
+  if (typeof window !== "undefined") {
+    try {
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed.lastScannedBlock && Array.isArray(parsed.forms)) {
+          fromBlock = BigInt(parsed.lastScannedBlock) + 1n;
+          cachedForms = parsed.forms;
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to parse local cache", err);
+    }
+  }
+
+  // If the cache is fully up to date
+  if (fromBlock > latestBlock) {
+    return cachedForms;
+  }
+
+  // Build all chunk ranges up front
   const ranges: Array<{ from: bigint; to: bigint }> = [];
   let cursor = fromBlock;
   while (cursor <= latestBlock) {
@@ -85,43 +155,58 @@ export async function getForms(
   }
 
   const totalChunks = ranges.length;
-  const showProgress = totalChunks > 10;
-  let chunksScanned = 0;
+  const showProgress = totalChunks > 5; // Revert threshold to 5 since ranges will be small with cache
 
   // Type the log accumulator from a concrete typed getLogs signature.
   type FormCreatedLog = Awaited<ReturnType<typeof publicClient.getLogs<typeof FORM_CREATED_EVENT>>>;
 
-  // Fire all chunk requests in parallel — independent read-only queries.
-  const chunkResults = await Promise.all(
-    ranges.map(async ({ from, to }) => {
-      const result = await publicClient.getLogs({
-        address: MONFORM_CONTRACT_ADDRESS,
-        event: FORM_CREATED_EVENT,
-        // Filter by owner directly so the RPC skips other owners' events.
-        args: { owner: ownerAddress as `0x${string}` },
-        fromBlock: from,
-        toBlock: to,
-      });
-      if (showProgress) {
-        chunksScanned++;
-        onProgress?.(chunksScanned, totalChunks);
-      }
-      return result;
-    }),
-  );
+  // Create tasks for each chunk
+  const chunkTasks = ranges.map(({ from, to }) => async () => {
+    return publicClient.getLogs({
+      address: MONFORM_CONTRACT_ADDRESS,
+      event: FORM_CREATED_EVENT,
+      args: { owner: ownerAddress as `0x${string}` },
+      fromBlock: from,
+      toBlock: to,
+    });
+  });
+
+  // Run the chunk requests through our rate-limited queue
+  const chunkResults = await runWithRateLimit(chunkTasks, (done, total) => {
+    if (showProgress) {
+      onProgress?.(done, total);
+    }
+  });
 
   const allLogs: FormCreatedLog = chunkResults.flat();
 
-  // Fetch each matched form's schema in parallel.
-  const forms = await Promise.all(
-    allLogs.map(async (log) => {
-      const formId = Number(log.args.formId);
-      return getForm(formId);
-    }),
-  );
+  // Fetch schemas for newly discovered forms (also rate-limited to protect RPC)
+  const formTasks = allLogs.map((log) => async () => {
+    const formId = Number(log.args.formId);
+    return getForm(formId);
+  });
 
-  // Filter out any nulls (shouldn't happen, but defensive).
-  return forms.filter((f): f is Form => f !== null);
+  const newFormsRaw = await runWithRateLimit(formTasks);
+  const newForms = newFormsRaw.filter((f): f is Form => f !== null);
+
+  const finalForms = [...cachedForms, ...newForms];
+
+  // Update the cache with the new latest block and combined forms
+  if (typeof window !== "undefined") {
+    try {
+      localStorage.setItem(
+        cacheKey,
+        JSON.stringify({
+          lastScannedBlock: latestBlock.toString(),
+          forms: finalForms,
+        })
+      );
+    } catch (err) {
+      console.warn("Failed to write to local cache", err);
+    }
+  }
+
+  return finalForms;
 }
 
 /**
