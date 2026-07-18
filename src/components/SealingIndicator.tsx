@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { WaxSealMark } from "@/components/WaxSealMark";
+import Image from "next/image";
 
 /**
  * The publish-time counterpart to SealAnimation — a stamp settling into
@@ -24,7 +24,14 @@ export function SealingIndicator() {
           animate={{ scale: 1, opacity: 1 }}
           transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
         >
-          <WaxSealMark className="h-9 w-9" />
+          <Image
+            src="/logo.png"
+            alt="MonForm"
+            width={36}
+            height={36}
+            className="rounded-lg shrink-0"
+            priority
+          />
         </motion.div>
       </div>
       <p className="text-xs uppercase tracking-widest text-muted-foreground">Sealing onchain…</p>
