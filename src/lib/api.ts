@@ -18,21 +18,29 @@ const CONTRACT_DEPLOY_BLOCK =
 /** Maximum blocks per eth_getLogs call (Monad cap is 100; use 90 for safety). */
 const LOG_CHUNK_SIZE = 90n;
 
+let publicClientInstance: ReturnType<typeof createPublicClient> | null = null;
 export function getPublicClient() {
-  return createPublicClient({
-    chain: monadTestnet,
-    transport: http(RPC_URL),
-  });
+  if (!publicClientInstance) {
+    publicClientInstance = createPublicClient({
+      chain: monadTestnet,
+      transport: http(RPC_URL),
+    });
+  }
+  return publicClientInstance;
 }
 
+let walletClientInstance: ReturnType<typeof createWalletClient> | null = null;
 export function getWalletClient() {
   if (typeof window === "undefined" || !window.ethereum) {
     throw new Error("Wallet not connected");
   }
-  return createWalletClient({
-    chain: monadTestnet,
-    transport: custom(window.ethereum),
-  });
+  if (!walletClientInstance) {
+    walletClientInstance = createWalletClient({
+      chain: monadTestnet,
+      transport: custom(window.ethereum),
+    });
+  }
+  return walletClientInstance;
 }
 
 // ---------------------------------------------------------------------------

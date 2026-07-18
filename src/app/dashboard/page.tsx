@@ -43,18 +43,25 @@ export default function DashboardPage() {
     }
     setLoading(true);
     setScanProgress(null);
-    getForms(address, (scanned, total) => setScanProgress({ scanned, total })).then(async (rawForms) => {
-      // Fetch submission counts in parallel.
-      const withCounts = await Promise.all(
-        rawForms.map(async (form) => {
-          const subs = await getSubmitters(form.id);
-          return { ...form, submissionCount: subs.length };
-        }),
-      );
-      setForms(withCounts);
-      setLoading(false);
-      setScanProgress(null);
-    });
+    getForms(address, (scanned, total) => setScanProgress({ scanned, total }))
+      .then(async (rawForms) => {
+        // Fetch submission counts in parallel.
+        const withCounts = await Promise.all(
+          rawForms.map(async (form) => {
+            const subs = await getSubmitters(form.id);
+            return { ...form, submissionCount: subs.length };
+          }),
+        );
+        setForms(withCounts);
+        setLoading(false);
+        setScanProgress(null);
+      })
+      .catch((err) => {
+        console.error("Failed to load forms:", err);
+        setLoading(false);
+        setScanProgress(null);
+        // We could set an error state here, but for now we'll just stop the loader
+      });
   }, [address]);
 
   // ── Not connected ──────────────────────────────────────────────────────────
