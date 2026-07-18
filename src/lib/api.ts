@@ -6,6 +6,18 @@ import type { DecryptedResponse, Form, FormField, Submission } from "./types";
 
 const RPC_URL = "https://testnet-rpc.monad.xyz";
 
+/**
+ * Block at which the MonForm contract was deployed on Monad Testnet.
+ * Hardcoded so we never query from block 0 — which the RPC rejects
+ * (eth_getLogs is capped at a 100-block range per call).
+ * Verified via binary-search of eth_getCode on 2026-07-18.
+ */
+const CONTRACT_DEPLOY_BLOCK =
+  BigInt(process.env.NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK ?? "45989334");
+
+/** Maximum blocks per eth_getLogs call (Monad cap is 100; use 90 for safety). */
+const LOG_CHUNK_SIZE = 90n;
+
 export function getPublicClient() {
   return createPublicClient({
     chain: monadTestnet,
@@ -27,32 +39,74 @@ export function getWalletClient() {
 // Forms
 // ---------------------------------------------------------------------------
 
+/** Shape of the FormCreated event for typed getLogs calls. */
+const FORM_CREATED_EVENT = {
+  type: "event",
+  name: "FormCreated",
+  inputs: [
+    { indexed: true,  name: "formId",     type: "uint256" },
+    { indexed: true,  name: "owner",      type: "address" },
+    { indexed: false, name: "metadataId", type: "string"  },
+  ],
+} as const;
+
 /**
- * Fetch all forms owned by the given address by scanning FormCreated events,
- * then loading each form's real schema from Irys using the onchain metadataId.
+ * Fetch all forms owned by the given address by scanning FormCreated events.
+ *
+ * Monad's public testnet RPC caps eth_getLogs to a 100-block range per call,
+ * so we walk the chain in LOG_CHUNK_SIZE-block windows from the contract's
+ * deploy block to the current head and merge the results.
+ *
+ * @param ownerAddress  Wallet address whose forms to fetch.
+ * @param onProgress    Optional callback invoked after each chunk with
+ *                      (chunksScanned, totalChunks) so the UI can show
+ *                      real progress instead of a frozen spinner.
  */
-export async function getForms(ownerAddress: string): Promise<Form[]> {
+export async function getForms(
+  ownerAddress: string,
+  onProgress?: (scanned: number, total: number) => void,
+): Promise<Form[]> {
   const publicClient = getPublicClient();
 
-  // Pull every FormCreated event ever emitted and filter by owner.
-  const logs = await publicClient.getLogs({
-    address: MONFORM_CONTRACT_ADDRESS,
-    event: {
-      type: "event",
-      name: "FormCreated",
-      inputs: [
-        { indexed: true,  name: "formId",     type: "uint256" },
-        { indexed: true,  name: "owner",      type: "address" },
-        { indexed: false, name: "metadataId", type: "string"  },
-      ],
-    },
-    fromBlock: 0n,
-    toBlock: "latest",
-  });
+  const latestBlock = await publicClient.getBlockNumber();
+  const fromBlock = CONTRACT_DEPLOY_BLOCK;
 
-  const ownerLogs = logs.filter(
+  // Total number of chunks we'll need to scan.
+  const totalChunks = Math.ceil(
+    Number(latestBlock - fromBlock + 1n) / Number(LOG_CHUNK_SIZE),
+  );
+
+  // Type the accumulator from a real typed getLogs call so .args is resolved.
+  type FormCreatedLog = Awaited<ReturnType<typeof publicClient.getLogs<typeof FORM_CREATED_EVENT>>>;
+  const allLogs: FormCreatedLog = [];
+
+  let chunkStart = fromBlock;
+  let chunksScanned = 0;
+
+  while (chunkStart <= latestBlock) {
+    const chunkEnd =
+      chunkStart + LOG_CHUNK_SIZE - 1n < latestBlock
+        ? chunkStart + LOG_CHUNK_SIZE - 1n
+        : latestBlock;
+
+    const chunk = await publicClient.getLogs({
+      address: MONFORM_CONTRACT_ADDRESS,
+      event: FORM_CREATED_EVENT,
+      fromBlock: chunkStart,
+      toBlock: chunkEnd,
+    });
+
+    allLogs.push(...chunk);
+    chunksScanned++;
+    onProgress?.(chunksScanned, totalChunks);
+
+    chunkStart = chunkEnd + 1n;
+  }
+
+  // Filter to this owner's logs only.
+  const ownerLogs = allLogs.filter(
     (log) =>
-      (log.args.owner as string)?.toLowerCase() === ownerAddress.toLowerCase(),
+      log.args.owner?.toLowerCase() === ownerAddress.toLowerCase(),
   );
 
   // Fetch each form's schema in parallel.

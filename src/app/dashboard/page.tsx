@@ -34,6 +34,7 @@ export default function DashboardPage() {
   const { address, isConnected } = useAccount();
   const [forms, setForms] = useState<FormWithMeta[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const [scanProgress, setScanProgress] = useState<{ scanned: number; total: number } | null>(null);
 
   useEffect(() => {
     if (!address) {
@@ -41,7 +42,8 @@ export default function DashboardPage() {
       return;
     }
     setLoading(true);
-    getForms(address).then(async (rawForms) => {
+    setScanProgress(null);
+    getForms(address, (scanned, total) => setScanProgress({ scanned, total })).then(async (rawForms) => {
       // Fetch submission counts in parallel.
       const withCounts = await Promise.all(
         rawForms.map(async (form) => {
@@ -51,6 +53,7 @@ export default function DashboardPage() {
       );
       setForms(withCounts);
       setLoading(false);
+      setScanProgress(null);
     });
   }, [address]);
 
@@ -78,7 +81,29 @@ export default function DashboardPage() {
     return (
       <div className="container max-w-3xl py-24 flex flex-col items-center gap-4">
         <Loader2 className="h-6 w-6 text-brass animate-spin" />
-        <p className="text-sm text-muted-foreground">Loading your forms…</p>
+        {scanProgress ? (
+          <>
+            <p className="text-sm text-muted-foreground">
+              Scanning blocks{" "}
+              <span className="font-data text-foreground/70">
+                {scanProgress.scanned}
+              </span>
+              {" of "}
+              <span className="font-data text-foreground/70">
+                {scanProgress.total}
+              </span>
+              …
+            </p>
+            <div className="w-48 h-1 rounded-full bg-secondary/20 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-brass/60 transition-all duration-150"
+                style={{ width: `${Math.round((scanProgress.scanned / scanProgress.total) * 100)}%` }}
+              />
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground">Loading your forms…</p>
+        )}
       </div>
     );
   }
