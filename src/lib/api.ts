@@ -53,16 +53,15 @@ const FORM_CREATED_EVENT = {
 /**
  * Fetch all forms owned by the given address by scanning FormCreated events.
  *
- * Monad's public testnet RPC caps eth_getLogs to a 100-block range per call,
- * so we build all chunk ranges up front and fire them all in parallel with
- * Promise.all — each chunk is an independent read-only query so this is safe,
- * and it cuts the total wall-clock time to a single round-trip batch regardless
- * of how many chunks there are.
+ * Monad's public testnet RPC caps eth_getLogs to a 100-block range per call AND
+ * rate-limits heavy parallel traffic with 429s.  We therefore:
+ *   1. Filter by owner address as an indexed topic so each call only returns
+ *      this owner's events (avoids large payloads and wasted filtering).
+ *   2. Walk chunks sequentially with a short delay between calls to stay
+ *      comfortably inside the rate limit.
  *
  * @param ownerAddress  Wallet address whose forms to fetch.
- * @param onProgress    Optional callback invoked with (chunksScanned, totalChunks).
- *                      Only fires if totalChunks > 5; for small ranges the load
- *                      completes fast enough that a progress bar would just flash.
+ * @param onProgress    Callback fired after each chunk: (chunksScanned, totalChunks).
  */
 export async function getForms(
   ownerAddress: string,
@@ -73,7 +72,7 @@ export async function getForms(
   const latestBlock = await publicClient.getBlockNumber();
   const fromBlock = CONTRACT_DEPLOY_BLOCK;
 
-  // Build all [from, to] chunk ranges up front.
+  // Build all chunk ranges up front so we know totalChunks before starting.
   const ranges: Array<{ from: bigint; to: bigint }> = [];
   let cursor = fromBlock;
   while (cursor <= latestBlock) {
@@ -86,39 +85,37 @@ export async function getForms(
   }
 
   const totalChunks = ranges.length;
-  const showProgress = totalChunks > 5;
-  let chunksScanned = 0;
 
-  // Type the accumulator from a real typed getLogs call so .args is resolved.
+  // Type the log accumulator from a concrete typed getLogs signature.
   type FormCreatedLog = Awaited<ReturnType<typeof publicClient.getLogs<typeof FORM_CREATED_EVENT>>>;
+  const allLogs: FormCreatedLog = [];
 
-  // Fire all chunk requests in parallel — independent read-only queries.
-  const chunkResults = await Promise.all(
-    ranges.map(async ({ from, to }) => {
-      const result = await publicClient.getLogs({
-        address: MONFORM_CONTRACT_ADDRESS,
-        event: FORM_CREATED_EVENT,
-        fromBlock: from,
-        toBlock: to,
-      });
-      if (showProgress) {
-        chunksScanned++;
-        onProgress?.(chunksScanned, totalChunks);
-      }
-      return result;
-    }),
-  );
+  // Sequential scan with a short inter-chunk delay to avoid 429s.
+  let chunkIndex = 0;
+  for (const { from, to } of ranges) {
 
-  const allLogs: FormCreatedLog = chunkResults.flat();
+    const chunk = await publicClient.getLogs({
+      address: MONFORM_CONTRACT_ADDRESS,
+      event: FORM_CREATED_EVENT,
+      // Filter by owner (topic[1]) directly so the RPC skips other owners' events.
+      args: { owner: ownerAddress as `0x${string}` },
+      fromBlock: from,
+      toBlock: to,
+    });
 
-  // Filter to this owner's logs only.
-  const ownerLogs = allLogs.filter(
-    (log) => log.args.owner?.toLowerCase() === ownerAddress.toLowerCase(),
-  );
+    allLogs.push(...chunk);
+    chunkIndex++;
+    onProgress?.(chunkIndex, totalChunks);
 
-  // Fetch each form's schema in parallel.
+    // Brief pause between chunks — keeps us well under Monad's rate limit.
+    if (chunkIndex < totalChunks) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  // Fetch each matched form's schema in parallel.
   const forms = await Promise.all(
-    ownerLogs.map(async (log) => {
+    allLogs.map(async (log) => {
       const formId = Number(log.args.formId);
       return getForm(formId);
     }),
