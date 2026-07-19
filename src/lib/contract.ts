@@ -38,6 +38,13 @@ export const monformAbi = [
 
   // ─── View functions ──────────────────────────────────────────────────────
   {
+    inputs: [],
+    name: "formCount",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
     inputs: [{ internalType: "uint256", name: "formId", type: "uint256" }],
     name: "getSubmitters",
     outputs: [{ internalType: "address[]", name: "", type: "address[]" }],

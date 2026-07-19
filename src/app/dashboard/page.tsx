@@ -33,17 +33,16 @@ interface FormWithMeta extends Form {
 export default function DashboardPage() {
   const { address, isConnected } = useAccount();
   const [forms, setForms] = useState<FormWithMeta[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [scanProgress, setScanProgress] = useState<{ scanned: number; total: number } | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!address) {
       setForms(null);
+      setLoading(false);
       return;
     }
     setLoading(true);
-    setScanProgress(null);
-    getForms(address, (scanned, total) => setScanProgress({ scanned, total }))
+    getForms(address)
       .then(async (rawForms) => {
         // Fetch submission counts in parallel.
         const withCounts = await Promise.all(
@@ -54,12 +53,10 @@ export default function DashboardPage() {
         );
         setForms(withCounts);
         setLoading(false);
-        setScanProgress(null);
       })
       .catch((err) => {
         console.error("Failed to load forms:", err);
         setLoading(false);
-        setScanProgress(null);
         // We could set an error state here, but for now we'll just stop the loader
       });
   }, [address]);
@@ -86,31 +83,9 @@ export default function DashboardPage() {
   // ── Loading ────────────────────────────────────────────────────────────────
   if (loading || forms === null) {
     return (
-      <div className="container max-w-3xl py-24 flex flex-col items-center gap-4">
-        <Loader2 className="h-6 w-6 text-brass animate-spin" />
-        {scanProgress ? (
-          <>
-            <p className="text-sm text-muted-foreground">
-              Scanning blocks{" "}
-              <span className="font-data text-foreground/70">
-                {scanProgress.scanned}
-              </span>
-              {" of "}
-              <span className="font-data text-foreground/70">
-                {scanProgress.total}
-              </span>
-              …
-            </p>
-            <div className="w-48 h-1 rounded-full bg-secondary/20 overflow-hidden">
-              <div
-                className="h-full rounded-full bg-brass/60 transition-all duration-150"
-                style={{ width: `${Math.round((scanProgress.scanned / scanProgress.total) * 100)}%` }}
-              />
-            </div>
-          </>
-        ) : (
-          <p className="text-sm text-muted-foreground">Loading your forms…</p>
-        )}
+      <div className="container max-w-3xl py-24 flex flex-col items-center justify-center min-h-[50vh]">
+        <Loader2 className="h-8 w-8 text-brass animate-spin mb-4" />
+        <p className="text-muted-foreground text-sm font-medium">Loading your forms...</p>
       </div>
     );
   }
